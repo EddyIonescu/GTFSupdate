@@ -1,7 +1,11 @@
-// Go code for AWS Lambda Service that updates stops-database every 12 hours
-// by retrieving publicly-available GTFS data
+/*
 
-// Libraries used: mgo mongodb driver, gtfs parser, object-to-hash
+ Go app for AWS Lambda Service that updates stops-database every 12 hours
+ by retrieving publicly-available GTFS data
+
+ Libraries used: mgo mongodb driver, gtfs parser, object-to-hash
+
+*/
 
 package main
 
@@ -59,19 +63,33 @@ type stop struct {
 	Name string `json:"name"`
 	LocalId string `json:"localid"`
 	Location location `json:"location"`
+	Agency agency `json:"agency"`
+}
+
+type agency struct {
+	Name string `json:"name"`
+	Link string `json:"gtfslink"`
 }
 
 func main() {
+	links := []agency{
+		{"ottawa-oc-transpo", "http://www.octranspo1.com/files/google_transit.zip"},
+		{"waterloo-grt", "http://www.regionofwaterloo.ca/opendatadownloads/GRT_GTFS.zip"},
+		{"toronto-ttc", "http://opendata.toronto.ca/TTC/routes/OpenData_TTC_Schedules.zip"},
+	}
 
 	// get gtfs from waterloo
-	feed := gtfsparser.NewFeed()
-	grtLink := "http://www.regionofwaterloo.ca/opendatadownloads/GRT_GTFS.zip"
-	grtName := "./src/grt.zip"
-	getZip(grtLink, grtName)
-	feed.Parse(grtName)
+	feeds := make([]*gtfsparser.Feed, len(links))
+	for i, agency := range links {
+		feed := gtfsparser.NewFeed()
+		getZip(agency.Link, "./src/gtfs.zip")
+		feed.Parse("./src/gtfs.zip")
 
-	fmt.Printf("Done, parsed %d agencies, %d stops, %d routes, %d trips, %d fare attributes\n\n",
-	len(feed.Agencies), len(feed.Stops), len(feed.Routes), len(feed.Trips), len(feed.FareAttributes))
+		fmt.Printf("Done with %s, parsed %d agencies, %d stops, %d routes, %d trips, %d fare attributes\n\n",
+			agency.Name, len(feed.Agencies), len(feed.Stops), len(feed.Routes), len(feed.Trips), len(feed.FareAttributes))
+
+		feeds[i] = feed
+	}
 
 	// connect to mongodb
 	info := mgo.DialInfo{}
@@ -87,46 +105,52 @@ func main() {
 	}
 	defer session.Close()
 
-
-	// iterate through stops and update database
-	stops := make([]stop, len(feed.Stops))
-	i := 0
-	agency := ""
-	for _, a := range feed.Agencies {
-		agency += a.Name + "_"
-	}
-	for k, v := range feed.Stops {
-		stops[i] = (stop{
-			Name: v.Name,
-			LocalId: k,
-			Location: location{"Point", []float32{v.Lon, v.Lat}},
-		})
-		hash, err := hashstructure.Hash(stops[i], nil)
-		if err != nil {
-			panic(err)
-		}
-		stops[i].Id = bson.ObjectId(strconv.FormatUint(hash, 10)[0:12])
-		//fmt.Printf("[%s] %s (@ %f,%f)\n", k, v.Name, v.Lat, v.Lon)
-		fmt.Println(hash)
-		fmt.Println(stops[i].Id)
-		fmt.Println(stops[i].Name)
-		i++
-	}
-
 	collection := session.DB("transistops").C("stops")
 
 	// TODO update instead of dropping
 	collection.DropCollection()
-	bulk := collection.Bulk()
-	for _, stop := range stops {
-		fmt.Println(stop.Id)
-		fmt.Println(stop.Name)
-		if(stop.Id != "") {
-			bulk.Insert(stop)
-		}
+
+	// so that we can do geojson 2d-sphere queries (in transibot)
+	index := mgo.Index{
+		Key: []string{"$2dsphere:position"},
+		Bits: 26,
 	}
-	_, err1 := bulk.Run()
-	if err1 != nil {
-		panic(err1)
+	err = collection.EnsureIndex(index)
+
+	for agencyIndex, feed := range feeds {
+		// iterate through stops and update database
+		stops := make([]stop, len(feed.Stops))
+		i := 0
+		for k, v := range feed.Stops {
+			stops[i] = (stop{
+				Name: v.Name,
+				LocalId: k,
+				Location: location{"Point", []float32{v.Lon, v.Lat}},
+			})
+			hash, err := hashstructure.Hash(stops[i], nil)
+			if err != nil {
+				panic(err)
+			}
+			stops[i].Id = bson.ObjectId(strconv.FormatUint(hash, 10)[0:12])
+			stops[i].Agency = links[agencyIndex]
+			//fmt.Printf("[%s] %s (@ %f,%f)\n", k, v.Name, v.Lat, v.Lon)
+			//fmt.Println(hash)
+			//fmt.Println(stops[i].Id)
+			//fmt.Println(stops[i].Name)
+			i++
+		}
+
+		bulk := collection.Bulk()
+		for _, stop := range stops {
+			//fmt.Println(stop.Id)
+			//fmt.Println(stop.Name)
+			if (stop.Id != "") {
+				bulk.Insert(stop)
+			}
+		}
+		_, err1 := bulk.Run()
+		if err1 != nil {
+			panic(err1)
+		}
 	}
 }
