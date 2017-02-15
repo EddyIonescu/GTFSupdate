@@ -61,24 +61,37 @@ type location struct {
 type stop struct {
 	Id bson.ObjectId `bson:"_id"`
 	Name string `json:"name"`
+	LocalCode string `json:"localcode"`
 	LocalId string `json:"localid"`
-	Location location `json:"location"`
+	Location location `json:"location",bson:"location"`
 	Agency agency `json:"agency"`
+}
+
+// contains info required to make realtime request
+type realtime struct {
+	NextBusAgencyId string `json:"nextbus_agency_id"`
+	GtfsRTupdate string `json:"gtfsrt_update"`
+	GtfsRTpositions string `json:"gtfsrt_positions"`
 }
 
 type agency struct {
 	Name string `json:"name"`
 	Link string `json:"gtfslink"`
+	RealTime realtime `json:"realtime"`
 }
 
 func main() {
 	links := []agency{
-		{"ottawa-oc-transpo", "http://www.octranspo1.com/files/google_transit.zip"},
-		{"waterloo-grt", "http://www.regionofwaterloo.ca/opendatadownloads/GRT_GTFS.zip"},
-		{"toronto-ttc", "http://opendata.toronto.ca/TTC/routes/OpenData_TTC_Schedules.zip"},
+		{"waterloo-grt", "http://www.regionofwaterloo.ca/opendatadownloads/GRT_GTFS.zip",
+			realtime{"", "http://192.237.29.212:8080/gtfsrealtime/TripUpdates",
+				"http://192.237.29.212:8080/gtfsrealtime/VehiclePositions"}},
+		{"toronto-ttc", "http://opendata.toronto.ca/TTC/routes/OpenData_TTC_Schedules.zip", realtime{"ttc", "", ""}},
+		{"sf-muni", "http://archives.sfmta.com/transitdata/google_transit.zip", realtime{"sf-muni", "", ""}},
+		//{"cali-bart", "https://transitfeeds.com/link?u=http://www.bart.gov/dev/schedules/google_transit.zip",
+		//	realtime{"", "http://api.bart.gov/gtfsrt/tripupdate.aspx", ""}},
 	}
 
-	// get gtfs from waterloo
+	// get gtfs file
 	feeds := make([]*gtfsparser.Feed, len(links))
 	for i, agency := range links {
 		feed := gtfsparser.NewFeed()
@@ -112,10 +125,13 @@ func main() {
 
 	// so that we can do geojson 2d-sphere queries (in transibot)
 	index := mgo.Index{
-		Key: []string{"$2dsphere:position"},
+		Key: []string{"$2dsphere:location"},
 		Bits: 26,
 	}
 	err = collection.EnsureIndex(index)
+	if err != nil {
+		panic(err)
+	}
 
 	for agencyIndex, feed := range feeds {
 		// iterate through stops and update database
@@ -125,6 +141,7 @@ func main() {
 			stops[i] = (stop{
 				Name: v.Name,
 				LocalId: k,
+				LocalCode: v.Code,
 				Location: location{"Point", []float32{v.Lon, v.Lat}},
 			})
 			hash, err := hashstructure.Hash(stops[i], nil)
